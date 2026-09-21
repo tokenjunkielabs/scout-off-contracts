@@ -1,0 +1,160 @@
+name: Apply scout-off #238 patch
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-scout238.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out pinned source base
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: 194e3ed1152fe43d65f8d4490cf0b9c5be6f2f2f2a
+
+      - name: Create clean source branch
+        run: |
+          git config user.name "tokenjunkielabs"
+          git config user.email "brycembusiness2@gmail.com"
+          git checkout -B zz-sol-variance7/scout238-validator-reuse 194e3ed1152fe43d65f8d4490cf0b9c5be6f2f2a
+
+      - name: Apply issue 238 source change
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("contracts/verification/src/lib.rs")
+          source = path.read_text()
+
+          replacements = [
+              (
+                  """        validate_cid(&evidence_hash).map_err(|_| VerificationError::InvalidInput)?;
+
+        // Verify the caller is an active validator
+""",
+                  """        // Execution order is intentional: auth -> format -> state -> write.
+        // Reject malformed evidence before paying for persistent validator storage,
+        // then reuse the loaded Validator throughout the shared commit path.
+        validate_cid(&evidence_hash).map_err(|_| VerificationError::InvalidInput)?;
+
+        // Verify the caller is an active validator
+""",
+                  ),
+              (
+                  """        Self::commit_approved_milestone(
+            &env,
+            &validator_wallet,
+            player_id,
+            description,
+            evidence_hash,
+        )
+""",
+                  """        Self::commit_approved_milestone(
+            &env,
+            &validator_wallet,
+            &validator,
+            player_id,
+            description,
+            evidence_hash,
+        )
+""",
+              ),
+              (
+                  """            let index = Self::commit_approved_milestone(
+                &env,
+                &validator_wallet,
+                player_id,
+                claim.description.clone(),
+                evidence_hash.clone(),
+            )?;
+""",
+                  """            let index = Self::commit_approved_milestone(
+                &env,
+                &validator_wallet,
+                &validator,
+                player_id,
+                claim.description.clone(),
+                evidence_hash.clone(),
+            )?;
+""",
+              ),
+              (
+                  """        let index = Self::commit_approved_milestone(
+            &env,
+            &validator_wallet,
+            attestation.player_id,
+            attestation.description.clone(),
+            attestation.evidence_hash.clone(),
+        )?;
+""",
+                  """        let index = Self::commit_approved_milestone(
+            &env,
+            &validator_wallet,
+            &validator,
+            attestation.player_id,
+            attestation.description.clone(),
+            attestation.evidence_hash.clone(),
+        )?;
+""",
+              ),
+              (
+                  """    fn commit_approved_milestone(
+        env: &Env,
+        validator_wallet: &Address,
+        player_id: u64,
+""",
+                  """    fn commit_approved_milestone(
+        env: &Env,
+        validator_wallet: &Address,
+        validator: &Validator,
+        player_id: u64,
+""",
+              ),
+              (
+                  """        let validator: Validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(validator_wallet.clone()))
+            .unwrap();
+
+        let mut player_affiliations: Vec<String> = env
+""",
+                  """        let mut player_affiliations: Vec<String> = env
+""",
+              ),
+          ]
+
+          for old, new in replacements:
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one match, found {count}: {old[:80]!r}")
+              source = source.replace(old, new, 1)
+
+          path.write_text(source)
+          PY
+
+      - name: Publish clean source branch
+        run: |
+          git add contracts/verification/src/lib.rs
+          git commit -m "perf(verification): reuse loaded validator on milestone commit"
+          git push origin HEAD:refs/heads/zz-sol-variance7/scout238-validator-reuse
+
+      - name: Remove one-shot transport workflow
+        if: always()
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+          if [ -f .github/workflows/apply-scout238.yml ]; then
+            git rm .github/workflows/apply-scout238.yml
+            git commit -m "chore: remove scout #238 one-shot transport"
+            git push origin main
+          fi
